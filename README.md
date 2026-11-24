@@ -1,5 +1,7 @@
 # Claude to ChatGPT
 
+**[Open the free browser converter / Abrir el conversor web](https://sospinat.github.io/claude-to-chatgpt/)**. Select a Claude ZIP, .skill or SKILL.md, or try the built-in example. Download the plugin, each skill and the migration report. Conversion runs on your device. Internet access loads the page and its Python runtime. You can use the converter without a ChatGPT account.
+
 Convert a Claude skill or Claude Code plugin into a ChatGPT plugin ZIP and individual skill ZIPs. Run the translator locally, or use the translator itself as a skill or plugin. The local conversion needs Python and PyYAML. It runs offline and requires no API key.
 
 ## Use it in ChatGPT
