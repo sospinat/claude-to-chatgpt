@@ -1,0 +1,20 @@
+{
+  "name": "claude-translator-tools",
+  "interface": {
+    "displayName": "Claude package translator"
+  },
+  "plugins": [
+    {
+      "name": "claude-to-chatgpt",
+      "source": {
+        "source": "local",
+        "path": "./plugins/claude-to-chatgpt"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
