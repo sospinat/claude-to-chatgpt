@@ -8,6 +8,7 @@ import re
 import stat
 import sys
 import tempfile
+import unicodedata
 from urllib.parse import urlsplit
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -25,6 +26,22 @@ HEADER = re.compile(r"\A---[ \t]*\n(.*?)^---[ \t]*(?:\n|\Z)", re.M | re.S)
 LEGAL = re.compile(r"(license|licence|notice|copying)(?:[.-].*)?$", re.I)
 ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 SHARED = {"scripts", "references", "assets", "templates"}
+WORKFLOW_TEXT = {
+    "en": {
+        "arguments": "the arguments provided by the user",
+        "position": "argument {number} from the user's request",
+        "trigger": "Use the {name} workflow when requested.",
+        "explicit": "Use this workflow only when the user explicitly requests it.",
+        "package": "Workflows from {name}.",
+    },
+    "es": {
+        "arguments": "los argumentos de la solicitud",
+        "position": "el argumento {number} de la solicitud",
+        "trigger": "Aplica el procedimiento {name} cuando el usuario lo solicite.",
+        "explicit": "Aplica este procedimiento solo si el usuario lo solicita expresamente.",
+        "package": "Procedimientos de {name}.",
+    },
+}
 RUNTIME = re.compile(r"!\x60|^!command\b|CLAUDE_[A-Z_]+|\$\{user_config\.|\$ARGUMENTS|\$\d+\b|mcp__|\.claude/|(?i:\bClaude Code\b|\b(?:Bash|Read|Write|Edit|Grep|Glob|Task)\s*\()", re.M)
 
 
@@ -72,14 +89,19 @@ def read_package(source):
             raise ValueError(f"Duplicate or conflicting path: {name}")
         files[name] = read()
 
-    if source.is_dir():
+    single_file = source.is_file() and source.name == "SKILL.md"
+    if source.is_dir() or single_file:
+        base = source.parent if single_file else source
         def fail(error):
             raise error
-        for folder, dirs, names in os.walk(source, onerror=fail):
+        for folder, dirs, names in os.walk(base, onerror=fail):
+            if single_file and Path(folder) == base:
+                dirs[:] = [d for d in dirs if d in SHARED or d == "agents"]
+                names = [n for n in names if n == "SKILL.md" or LEGAL.fullmatch(n)]
             dirs[:] = sorted(d for d in dirs if not ignored(d))
             for item in dirs + sorted(names):
                 path = Path(folder, item)
-                name = path.relative_to(source).as_posix()
+                name = path.relative_to(base).as_posix()
                 if ignored(name):
                     continue
                 info = path.lstat()
@@ -90,7 +112,7 @@ def read_package(source):
                 if not stat.S_ISREG(info.st_mode):
                     raise ValueError(f"Unsupported file type: {name}")
                 add(name, info.st_size, path.read_bytes)
-        return files, source.resolve().name
+        return files, base.resolve().name
     with ZipFile(source) as archive:
         for item in archive.infolist():
             name = clean_path(item.filename.rstrip("/"))
@@ -113,7 +135,8 @@ def read_package(source):
 def slug(value):
     if not isinstance(value, str):
         raise ValueError("Package and skill names must be strings.")
-    result = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:64].rstrip("-")
+    latin = "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
+    result = re.sub(r"[^a-z0-9]+", "-", latin.lower()).strip("-")[:64].rstrip("-")
     if not result:
         raise ValueError(f"Supply a name containing a Latin letter or digit for {value!r}.")
     clean_path(result)
@@ -189,10 +212,13 @@ def convert_servers(files, manifest, notes, covered):
     sources = config if isinstance(config, list) else [config]
     if ".mcp.json" in files:
         sources = [".mcp.json", *sources]
-    servers = {}
+    servers, loaded_files = {}, set()
     for source in sources:
         if isinstance(source, str):
             key = clean_path(source.removeprefix("./"))
+            if key in loaded_files:
+                continue
+            loaded_files.add(key)
             record = read_object(files[key], key)
             covered.add(key)
         else:
@@ -215,7 +241,8 @@ def convert_servers(files, manifest, notes, covered):
     return servers
 
 
-def convert(files, label):
+def convert(files, label, language="en"):
+    wording = WORKFLOW_TEXT[language]
     plugin = plugin_layout(files)
     manifest = read_object(files[CLAUDE_MANIFEST], CLAUDE_MANIFEST) if CLAUDE_MANIFEST in files else {}
     notes, mappings, out, skill_zips = [], [], {}, {}
@@ -242,7 +269,7 @@ def convert(files, label):
             raise ValueError(f"Multiple workflows map to '{name}'. Give each one a distinct name.")
         desc = description or meta.get("description")
         if not desc:
-            desc = f"Use the {name.replace('-', ' ')} workflow when requested."
+            desc = wording["trigger"].format(name=name.replace("-", " "))
             notes.append(f"{path}: refine the generated trigger description.")
         if not isinstance(desc, str) or len(desc.strip()) > 1024 or not desc.strip() or re.search("[<>]", desc):
             raise ValueError(f"Use a 1–1024 character description without angle brackets in {path}.")
@@ -292,14 +319,14 @@ def convert(files, label):
                     in_fence = None
             elif in_fence is None and "\x60" not in line and not line.startswith(("    ", "\t", "!")):
                 line = re.sub(r"\bYou are Claude(?: Code)?(?=[,.])", "You are ChatGPT", line)
-                line = re.sub(r"\$ARGUMENTS\[(\d+)\]", lambda m: f"argument {int(m[1]) + 1} from the user's request", line)
-                line = re.sub(r"\$ARGUMENTS\b", "the arguments provided by the user", line)
+                line = re.sub(r"\$ARGUMENTS\[(\d+)\]", lambda m: wording["position"].format(number=int(m[1]) + 1), line)
+                line = re.sub(r"\$ARGUMENTS\b", wording["arguments"], line)
             converted.append(line)
         body = "\n".join(converted)
         if RUNTIME.search(body):
             notes.append(f"{path}: adapt remaining Claude runtime references or tool calls in the body.")
         if meta.get("disable-model-invocation") is True:
-            body = "Use this workflow only when the user explicitly requests it.\n\n" + body
+            body = wording["explicit"] + "\n\n" + body
             config = yaml.safe_load(bundle.get("agents/openai.yaml", b"{}")) or {}
             config.setdefault("policy", {})["allow_implicit_invocation"] = False
             bundle["agents/openai.yaml"] = yaml.safe_dump(config).encode()
@@ -318,7 +345,7 @@ def convert(files, label):
         raise ValueError("No convertible skills, commands or agents. " + details)
     plugin_name = slug(manifest.get("name", label)) if plugin else mappings[0]["skill"]
     plugin_meta = {"$schema": SCHEMA + "plugin.schema.json", "name": plugin_name,
-                   "description": manifest.get("description") or f"Workflows from {plugin_name}."}
+                   "description": manifest.get("description") or wording["package"].format(name=plugin_name)}
     for key in ("version", "license"):
         if isinstance(manifest.get(key), str):
             plugin_meta[key] = manifest[key]
@@ -349,10 +376,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="Local skill or plugin directory or ZIP, or its SKILL.md")
     parser.add_argument("--out", required=True, type=Path, help="New output directory")
+    parser.add_argument("--language", choices=WORKFLOW_TEXT, default="en",
+                        help="Language for generated workflow wording (en or es, default: en). Source prose is preserved.")
     args = parser.parse_args()
     source = args.source.resolve()
-    if source.name == "SKILL.md" and source.is_file():
-        source = source.parent
     dest = args.out.resolve()
     if dest.exists():
         parser.exit(2, "Choose a new output directory.\n")
@@ -360,7 +387,9 @@ def main():
         parser.exit(2, "Choose an output directory outside the source package.\n")
     try:
         files, label = read_package(source)
-        package, skills, report = convert(files, label)
+        package, skills, report = convert(files, label, args.language)
+        if source.is_file() and source.name == "SKILL.md":
+            report["manual_review"].append("Single SKILL.md input: verify references outside scripts, references, assets, templates and agents. Supply the dedicated skill folder or ZIP to include custom resources.")
         dest.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=dest.parent) as temp:
             staging = Path(temp, "result")

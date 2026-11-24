@@ -29,9 +29,9 @@ class TranslationTests(unittest.TestCase):
     def manifest(self, **fields):
         self.put(".claude-plugin/plugin.json", json.dumps({"name": "example", **fields}))
 
-    def run_cli(self, source=None, ok=True):
+    def run_cli(self, source=None, ok=True, options=()):
         run = subprocess.run([sys.executable, str(SCRIPT), str(source or self.source),
-                              "--out", str(self.dest)], capture_output=True, text=True)
+                              "--out", str(self.dest), *options], capture_output=True, text=True)
         if ok:
             self.assertEqual(run.returncode, 0, run.stderr)
         else:
@@ -100,6 +100,36 @@ class TranslationTests(unittest.TestCase):
         self.run_cli()
         with ZipFile(self.dest / "skills/brief.zip") as z:
             self.assertIn("Outline the supplied topic.", z.read("brief/SKILL.md").decode())
+
+    def test_spanish_workflow_preserves_source_rules_and_template(self):
+        self.manifest()
+        self.put("commands/Revisión.md", "Organiza $ARGUMENTS con ${CLAUDE_PLUGIN_ROOT}/assets/acta.txt.\nPrimer tema: $ARGUMENTS[0].")
+        self.put("assets/acta.txt", "ACUERDOS\nResponsable | Fecha\n")
+        self.run_cli(options=["--language", "es"])
+        with ZipFile(self.dest / "skills/revision.zip") as skill, ZipFile(self.dest / "plugin.zip") as plugin:
+            body = skill.read("revision/SKILL.md").decode()
+            self.assertEqual(body, plugin.read("skills/revision/SKILL.md").decode())
+            self.assertEqual(body.split("---\n\n", 1)[1],
+                             "Organiza los argumentos de la solicitud con plugin-resources/assets/acta.txt.\n"
+                             "Primer tema: el argumento 1 de la solicitud.\n")
+            self.assertEqual(skill.read("revision/plugin-resources/assets/acta.txt"),
+                             (self.source / "assets/acta.txt").read_bytes())
+
+    def test_loose_markdown_excludes_unrelated_neighbors(self):
+        self.put("SKILL.md", "Use references/outline.md.")
+        self.put("references/outline.md", "Draft")
+        self.put("other-project/notes.md", "Unrelated work")
+        self.put("other-upload.zip", "Unrelated attachment")
+        self.run_cli(self.source / "SKILL.md")
+        with ZipFile(self.dest / "skills/example.zip") as skill:
+            self.assertEqual(set(skill.namelist()), {"example/SKILL.md", "example/references/outline.md"})
+        self.assertFalse(self.report()["omitted_files"])
+
+    def test_redeclared_default_mcp_file_loads_once(self):
+        self.manifest(mcpServers="./.mcp.json")
+        self.put(".mcp.json", json.dumps({"mcpServers": {"docs": {"type": "http", "url": "https://example.org/mcp"}}}))
+        self.run_cli()
+        self.assertEqual(self.report()["mcp_servers"], ["docs"])
 
     def test_unconvertible_plugin_explains_missing_port(self):
         self.manifest(mcpServers={"local": {"command": "server"}})
