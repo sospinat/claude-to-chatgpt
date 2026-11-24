@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "claude-to-chatgpt",
+  "version": "1.0.0",
+  "description": "Translate Claude skills, commands and plugin packages into ChatGPT skill and plugin ZIPs.",
+  "license": "MIT"
+}
